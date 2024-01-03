@@ -1,0 +1,2 @@
+# notes
+to new bing
