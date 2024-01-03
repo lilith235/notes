@@ -1,0 +1,432 @@
+Lift-Attend-Splat: Bird＊s-eye-view camera-lidar fusion using transformers 
+James Gunn* Zygmunt Lenyk* Anuj Sharma Andrea Donati Alexandru Buburuzan John Redford Romain Mueller FiveAI 
+<first>.<last>@five.ai 
+arXiv:2312.14919v1 [cs.CV] 22 Dec 2023
+Abstract 
+Combining complementary sensor modalities is crucial to providing robust perception for safety-critical robotics applications such as autonomous driving (AD). Recent state-of-the-art camera-lidar fusion methods for AD rely on monocular depth estimation whichis a notoriously dif-ficult task compared to using depth information from the lidar directly. Here, we find that this approach does not leverage depth as expected and show that naively improv-ing depth estimation does not lead to improvements in ob-ject detection performance and that, strikingly, removing depth estimation altogether does not degrade object detec-tion performance. This suggests that relying on monocu-lar depth could be an unnecessary architectural bottleneck during camera-lidar fusion. In this work, we introduce a novel fusion method that bypasses monocular depth estima-tion altogether and instead selects and fuses camera and lidar features in a bird＊s-eye-view grid using a simple at-tention mechanism. We show that our model can modulate its use of camera features based on the availability of li-dar features and that it yields better 3D object detection on the nuScenes dataset than baselines relying on monocular depth estimation. 
+1. Introduction 
+Integrating information from different modalities efficiently and effectively is especially important in safety-critical ap-plications such as autonomous driving, where different sen-sor modalities are complementary and combining them ade-quatelyis crucialto guarantee safety.Forexample, cameras capture rich semantic informationof objectsuptofaraway distances, while lidars provide extremely accurate depth in-formationbutare sparseatlarge distances.Forthis reason, manymodern self-driving platformshavealarge numberof different sensors which must be combined together in order to provide accurate and reliable perception of the surround-
+*Equal contribution 
+ing sceneandallowsafedeploymentof thesevehiclesinthe real world. 
+Multimodal sensor fusion 〞 learninga unified represen-tation of a scene derived from multiple sensors 〞 offers a plausible solution to this problem. However, training such multimodal models can be challenging, especially when modalities are as different as cameras (RGB images) and li-dars(3Dpoint clouds).For instance,itisknownthatdiffer-ent modalitiesoverfit and generalise at different rates[53] and that training all modalities jointly can lead to underutil-isation of the weaker modalities and even to inferior results comparedto unimodal modelsin some situations[37]. 
+In the context of autonomous driving, manyof the recent state-of-the-art methods for camera-lidar fusion[14,28,33] are based on the Lift-Splat (LS) paradigm[38]1. In this ap-
+proach, the camera features are projected in bird＊s-eye-view (BEV) 〞 or top-down space 〞 using monocular depth be-fore being fused with the lidar features. As a result, the location of the camera features in BEV is highly dependent on the quality of the monocular depth prediction and it has been argued that its accuracy is critical[14, 28]. In this work we reconsider these claims and show that the monoc-ular depth prediction inside these models is of poor qual-ity and cannot account for their success. In particular, we present results showing that methods based on Lift-Splat perform equally well when the monocular depth prediction is replaced by direct depth estimation from the lidar point cloud or removed completely. This leads us to suggest that relying on monocular depth when fusing camera and lidar features is an unnecessary architectural bottleneck and that Lift-Splat could be replaced by a more effective projection mechanism. 
+We introduce a novel approach for camera-lidar fusion called ※Lift-Attend-Splat§ that bypasses monocular depth estimation altogether and instead selects and fuses cam-era and lidar features in BEV using a simple transformer. We present evidence that our method shows better cam-era utilisation compared to the methods based on moncular 
+1The ※shoot§ component of ※Lift, Splat, Shoot§[38]relates to trajec-
+tory prediction and is not considered here. 
+depth estimation and that it improves object detection per-formance. Our contributions are as follows: 
+. 
+We show that camera-lidar fusion methods based on the Lift-Splat paradigm are notleveragingdepth asexpected. In particular, we show that theyperform equivalently or better if monocular depth prediction is removed com-pletely. 
+
+. 
+We introduce a novel camera-lidar fusion method that fuses camera and lidar features in BEV using a simple at-tention mechanism.Weshowthatit leadsto better camera utilisation and improves 3D object detection compared to models based on the Lift-Splat paradigm. 
+
+
+2. Related work 
+3D object detection for autonomous driving For 3D ob-ject detection, most benchmarks are dominated by meth-ods using lidar point clouds due to their highly accurate range measurement allowing for better placement of objects in 3D compared to methods using cameras or radars only. Deep learning methods for classification on point clouds were pioneeredin the seminalworksof[40,41]and early works have been applying similar ideas to 3D object detec-tion[42,45].A more recentfamilyof methodsis based on directvoxelisationof the3D space[59,65]or compression of the lidar representation along the z-direction into ※pil-lars§[22,60]. These approacheshave beenvery successful and are the basisof manyfollow-upworks[15,19,62]. 
+The task of 3D object detection has also been tackled from multiple cameras alone. Earlyworkshavemostly been basedonvarioustwo-stage approaches[4,20,42,54],while recent methods have been leveraging monocular depth esti-mation directly[3,21,43]. Thistaskisdifficultwhenlidar is absent because 3D information must be estimated using images only, which is a challenging problem. However, re-centworkshaveshown impressive performanceby borrow-ing ideas from lidar detection pipelines[7,11,16],by im-
+proving position embeddings[31]and 3D queries[18], as well asbyleveraging temporal aggregation[12,25,30,32, 52,67]or2D semantic segmentation[64]. 
+Camera-lidar fusion Perception quality can be improved by leveragingjointly cameras and lidars when available. Recent fusion methods can be broadly classified in three categories: point decoration methods, methods that leverage task-specific object queries and architectures, and projec-tion based methods. Point decoration methods augment the lidar point cloud using semantic segmentation data[49,57], camera features[51], or even create new 3D points us-ing object detections in the image plane[63]. Such meth-
+ods are relatively easy to implement but suffer from the fact that they require lidar points to fuse camera features. TransFusion[1]isa recentexampleofa method thatlever-ages task-specific object queries generated using the lidar point cloud. Final detections are made directly without ex-plicit projection of camera features into BEV space. Fusion can also be performed earlier in the model, for example at thelevelof the3Dvoxels[5,6]or lidar features[23], or by sharing information between the camera and lidar backbones[17, 26, 39]. Finally, projection-based methods project camera features into 3D before fusing them with the lidar (see below). 
+Projection based methods Of special interest to us are camera-lidar fusion methods based on projecting camera features into 3D. Recent state-of-the-art methods[14, 28, 
+33] which rank among the top entries in the nuScenes leaderboard[2]leverage the ideas presented in[38]and project camera features in 3D using monocular depth es-timation. It was shown in [14] that the performance of[28, 33]can be boosted significantlyby including fea-tures derived from the ground-truth lidar depth map into the camera stream prior to monocular depth estimation. An al-ternative approach is to project camera features directly into BEV space using the known correspondence between lidar points and camera features[8, 23, 55]. However, the spar-
+sity of the lidar point cloud can limit which camera fea-tures are projected, as described in[33]. Finally, learning to project camera features in BEV without explicit depth canbeachievedwhenlidarisabsentusinga transformer,as shownin[25,44]. Here,weextendthislineofworktothe case of camera-lidar fusion and leverage cross-attention to generate a dense BEV grid of camera features to be fused with the lidar. 
+3. Monocular depth prediction in Lift-Splat 
+Recent camera-lidar fusion methods based on the Lift-Splat paradigm[28,33]learna unified representationin the form of a BEV grid by projecting camera features in BEV space using monocular depth estimation as 
+. ∩cam  ProjLift-Splat = Splat F . D, (1) 
+∩cam 
+RC ∩ ℅H℅W 
+c
+where F ﹋ is a context vector obtained 
+F cam RCc℅H℅W
+from the camera features ﹋ , D ﹋ RND℅H℅W isanormalised distributionover predetermined depth bins and Splat denotes the operation of projecting each point downwards into the z =0 plane, see[28,33, 38] for details. The resulting feature map is then merged with the lidar features using concatenation[33]orgated atten-tion[28]. In this paradigm, monocular depth prediction is formulated as a classification problem and learned indi-rectly from the downstream task without explicit depth su-pervision. 
+Lift-Splat depth prediction is generally poor We anal-yse the qualityof the depth predictedby BEVFusion[33] 
+Camera Lidar 
+
+BEVFusion[33] BEVFusion[33]w/竹 =1 
+Abs. Rel. ∣  RMSE ∣  mAP ∥  
+BEVFusion [33]  2.75  17.40  68.5  
+BEVFusion [33]w/ Eq. (2):  
+竹 = 0  2.83  18.54  68.4  
+竹 = 0.001  3.14  19.91  68.1  
+竹 = 0.01  0.76  8.09  68.0  
+竹 = 0.1  0.43  6.47  68.1  
+竹 = 1  0.22  4.77  68.1  
+竹 = 5  0.19  4.53  66.6  
+竹 = 100  0.16  4.55  64.6  
+Lidar  0.04  0.29  68.4  
+Pretrained  0.64  7.87  67.4  
+No depth  每  每  68.5  
+
+
+Figure1. Impactofthe qualityofthe monoculardepth predictiononthe object detection performanceof BEVFusion[33]onthe nuScenes validationset.We compare BEVFusionandfourdifferentvariants: addingdepth supervisionusingEq.(2)withvariousweights竹, using lidar depth maps instead of monocular depth estimation (lidar), using a pretrained and frozen depth classifier (pretrained), and finally removingdepth estimation altogetherby projecting camera featuresatall depthsuniformlyusingEq.(3)(no depth).In ourexperiments, more accurate depth does not translate to better detection performance and the original model is on-par with using the lidar points directly as a source of depth. Equivalent detection performance was achieved using the no depth model, clearly indicating that accurate monocular depthisnot necessaryfor BEVFusion[33]toachieveits performance,seemaintextandSec.A.4for details. 
+by comparing it to lidar depth maps, both qualitatively and quantitatively using the absolute relative (Abs. Rel.) and root mean squared errors (RMSE)[9, 24]. As shown in the example displayed on Fig. 1, the depth prediction does not accurately reflect the structure of the scene and is markedly different from the lidar depth map which suggests that monocular depthis notleveraged asexpectedin[33]. More details can be found in Sec. A.2. 
+Improving depth prediction does not improve detection performance We next investigate whether improving the the depth prediction quality can boost object detection per-formance. To do so, we retrain the model from[33]with the following loss: 
+Ltotal = Lsup + 竹Ldepth, (2) 
+where Lsup is the original 3D object detection loss and Ldepth is a simple cross-entropyloss for the depth estimation that uses the lidar depth asatarget, see Sec. A.3 for more details. By changing the hyper-parameter 竹, we can control the quality of the depth prediction and explore how it impacts detection performance. In Fig. 1, we see that while depth supervision indeed leads to much more accurate depth maps both visually and quantitatively, detection performance 〞 measured using meanaverage precision (mAP) 〞degrades from the baseline as the weight of the depth supervision is increased. This suggests that the method is unable to take advantageofmore accurate depth prediction. Since training on the multi-task loss Eq.(8)is likely to degrade object de-
+tection performanceathighvaluesof 竹, we alsoexperiment with two more variants: (i) pretraining the depth supervi-sion module separately and (ii) using the lidar point cloud directly to bypass the depth supervision module altogether. Pretraining leads to more accurate depth predictionbut de-grades detection performance relative to the baseline, while using the lidar directly does not change the detection per-formance compared to the baseline, even though all depth metrics are close to zero2. 
+Removing depth prediction altogether does not affect object detection performance The results above lead us tohypothesise that accurate monocular depth is not lever-aged in camera-lidar fusion methods based on the Lift-Splat projection. To test this, we remove the monocular depth prediction completely and replace the projection(1)by 
+. ∩cam  Projno-depth = Splat F . 1 , (3) 
+where we denote by 1 the tensor of the same shape as D with all entries equal to 1. This projects the camera features to all depths uniformly. Strikingly, we see in Fig. 1(right) that removing monocular depth estimation does not lead to a degradation in object detection performance, suggesting that accuratedepth estimationisnotakeycomponentofthis method.Wehypothesise thatthe importanceof monocular depthis greatly diminished when lidar features areavailable since lidar is a much more precise source of depth informa-tion and that the model is able to easily suppress camera 
+2Theyarenotexactlyzero becauseofthedepth quantisation introduced by the one-hot encoding of the lidar depth, see Sec. A.1. 
+features projected at the wrong location. This suggests that relying on monocular depth estimation could be an unnec-essary architectural bottleneck and lead to underutilisation of the camera. 
+4. Camera-lidar fusion without monocular depth estimation 
+In this section, we presentacamera-lidar fusion method that bypasses monocular depth estimation altogether and instead fuses camera and lidar features in bird＊s-eye-view using a simple transformer[48]. A naive application of the trans-
+former architecturetothe problemof camera-lidar fusionis difficult, however,due to the large number of camera and li-dar features and the quadratic nature of attention. As shown in[44],itis possibleto usethe geometryofthe problemto drastically restrict the scope of the attention when project-ing camera featuresin BEV, since camera features should only contribute to locations along their corresponding rays. We adapt this idea to the case of camera-lidar fusion and introduce a simple fusion method that uses cross-attention between columns in the camera plane and polar rays in the lidar BEV grid. Instead of predicting monocular depth, the cross-attention learns which camera features are the most salientgiven context providedby thelidar features along its ray. 
+With the exception of the projection of the camera fea-turesinBEV,our model sharesasimilaroverall architecture to methods based on the Lift-Splat paradigm[14, 28, 33] and is depicted on Fig. 2 left. It consists of the following modules: the camera and lidar backbones which produce features for each modality independently, a projection and fusion module that embeds the camera features into BEV and fuses them with the lidar, and finally a detection head. When considering object detection, the final output of the model is the property of objects in the scene represented as 3D bounding boxes with position, dimension, orientation, velocity and classification information. In what follows we explain in detail the architecture of our projection and fu-sion modules. 
+Projected horizon For each camera, we consider the hor-izontal line passing through the centre of the image and the plane corresponding to its projection in 3D. We call this plane the projected horizon of the camera. It can easily be described using homogeneous coordinates as the set of points x ﹋ R4 for which there exists a u ﹋ Rsuch that 
+Cx ‵ (u, h/2, 1), (4) 
+where C is the 3℅4 camera projection matrix (intrinsic and extrinsic), and h is the height of the image. Note that this plane is not in general parallel to the BEV grid, its relative orientation being definedby the camera＊sextrinsic parame-ters. We define a regular grid on the projected horizon that isalignedwiththe2Dgridof featuresintheimageplaneby tracing out rays from the intersection of the horizontal line with the edges of the feature columns in the image plane, and then separating these rays into a set of predetermined depth bins (similarly to[28]). Features on this grid can be representedbya matrix G ﹋ RND℅W , where each row cor-responds to a specific column in the camera feature map 
+F cam 
+﹋ RH℅W ℅C . The geometry of the projected horizon canbe seenin Fig. 2(left, inset). 
+Correspondence between projected horizons and BEV grid We can easily define a correspondence between points on the projected horizon and points on the BEV plane by projecting them along the z-direction in 3D space. As cameras are in general tilted with respect to the ground, this correspondence depends on each camera＊s extrinsic param-eters. We transfer lidar features from the BEV grid to a camera＊s projected horizon through bi-linear sampling of the BEV grid at the locations of the down-projected cell-centers of the projected horizon. We call this process ※lift-ing§ and denote it as Lifti for the projected horizon of cam-era i. Similarly, features can be transferred in the oppo-site direction, from projected horizon to BEV grid, by bi-linearly sampling the projected horizon at the locations of the projected cell-centers of the BEV grid. We denote this operation as Splati, similarlyto[28,33,38]. 
+Lift-Attend-Splat Our projection module is depicted in Fig. 2 (right) and can be broken down into three simple steps: (i) we first lift the BEV lidar features Blid onto the projected horizon of camera i, producing ※lifted§ lidar fea-
+B.lid
+tures , (ii) we then let the ※lifted§ lidar features attend
+i 
+to the camera features in the corresponding column using a simple transformer encoder-decoder, producing fused fea-
+B.fus
+tures on the projected horizon, and finally(iii) we splat
+i 
+these features back onto the BEV grid to produce Bfus. Dur-
+i 
+ing the attend step, the camera features in each column are encodedbya transformer encoder E and passed askeys and values to a transformer decoder D which uses the frustum lidar features as queries. The result of these three steps can be written as 
+  
+Bfus Blid,E (F cam 
+= Splati D Lifti ) , (5)
+ii 
+where Lifti and Splati project the BEV features onto the projected horizon of camera i (and vice versa) as described above. Finally, we apply a simple fusion module where we sum the projected features from different cameras together, concatenate them with the lidar features and apply a con-volutional block to obtain the final features in BEV. This simple architecture allows the camera features to be pro-
+
+Projected horizon 
+Bfus 
+i 
+
+
+Splat 
+B.fus 
+i 
+Image plane 
+E(F cam
+)
+i 
+
+
+Attend 
+Pos. enc. Pos. enc. 
+
+
+F cam 
+B.lid 
+i 
+i 
+Lift 
+Blid 
+
+
+Figure 2. Lift-Attend-Splat camera-lidar fusion architecture. (left) Overall architecture: features from the camera and lidar backbones are fused together and merged before being passed to a detection head. (inset) Geometry of our 3D projection: the ※Lift§ step embeds the lidar BEV features into the projected horizon by lifting the lidar features along the z-direction using bilinear sampling. The ※Splat§ step corresponds to the inverse transformation in that it projects features from the projected horizon back onto the BEV grid using bilinear sampling, again along the z-direction. (right) Details of the projection module: the ※Attend§ step in our method let the lifted lidar features 
+B.lid 
+
+i attend to the camera features Fi cam in the corresponding column using a simple encoder-decoder transformer architecture to produce 
+Blid
+fused features D(.i ,E(Fi cam )) in frustum space. 
+jected from the image plane onto the BEV grid without re-quiring monocular depth estimation. We use a single set of column-frustum transformer weights which are shared across all column-frustum pairs and cameras. For simplic-ity, we use here a single transformer encoder and decoder but show that increasing the number of such blocks can be beneficial in Sec. 5.4. 
+Attention vs depth prediction Itisworth discussinghow our approach differs from predicting monocular depth di-rectly. When using monocular depth, each feature in the camera feature map is projected into BEV at multiple loca-tions weightedbyanormalised depth distribution. This nor-malisation limits each feature to be projected either into a single location or smeared with lower intensity across mul-tiple depths. However, in our approach, the attention be-tween camera and lidar is such that the same camera feature can contribute fully to multiple locations in the BEV grid. Thisis possible because attentionis normalisedoverkeys, which correspond to different heights in the camera feature map, rather than queries, which correspond to different dis-tances along the ray. Furthermore, our model has access to lidar features in BEV when choosing where to project cam-era features, which gives it greater flexibility. 
+5. Experiments 
+We measure the effectiveness of our approach against re-cent camera-lidar fusion methods that use the Lift-Splat paradigm[28,33]. In allof ourexperiments, we concen-trate on3D object detection using the nuScenes dataset[2], which is a large-scale dataset for autonomous driving. We use the nuScenes detection score (NDS) and mean average precision (mAP) as evaluation metrics. We do not consider theextensionof[28,33]presentedin[14]asit introduces two supplementary dense depth supervision losses on the camera path to significantly boost the performance of the underlying methods. In this work, we use solely the 3D object detection losses present in[1, 28, 33]and leave ap-
+plyingthe frameworkof[14]to our methodfor futurework. 
+Overall architecture We use Dual-Swin-Tiny[27]with a featurepyramid network[29]andVoxelNet[65]as our camera and lidar encoders respectively. For our object de-tection head, we use the transformer-decoder-based mod-ule fromTransFusion-L[1].We use our Lift-Attend-Splat method, describedin Sec. 4,to project camera features into BEV space. We then fuse camera and lidar features us-ing simple concatenation and convolution. Following[33] the RPN part ofVoxelNet is applied to the merged feature. We ablate alternative choices for the fusion architecture in Sec. 5.4. 
+Implementation details We use an image resolution of 800x448 for inputs to the camera encoder, which is down-sampled 8x by the camera encoder into per-camera feature mapsofshape 100x56.ForVoxelNet,wefollowthesettings of[28]. During training, we set a maximum of 90k non-empty voxels which we increase to 180k during inference. Weusealidar BEV grid centred around theego with dimen-sions 108m℅108m and 0.075m cell size. This is downsam-pled8xbythe lidar encodertothe 180℅180 grid into which the camera features are projected. We construct the inter-mediate projected horizon with 143 uniformly spaced depth bins rangingfrom1mto72m.Forthe projectionof camera features into BEV, we use the original transformer[48]as our encoder-decoder architecture, with one encoder layer, one decoder layer, dmodel = 256 and dff = 512. We re-place the ReLU[36]activation function with GeLU[13], use learnable position embeddings[10]in place of sinu-soidal encodings and normalise features before each sub-layer[56].Wetiethe parametersin eachofthe8headsof our attention blocks. For the object detection head, we use 200 and 300 queries during training and inference respec-tively. 
+Training details Our lidar backbone is pretrained on 8 GPUs with batch-size of 1/GPU following the schedule pre-sented in[1], with CBGS[66]and copy-paste augmenta-tion[58].We initialise the camera backbone with weights pretrained on nuImages[2].We freeze the lidar backbone and train the camera backbone, projection, fusion and detec-tion head together for 20 epochs using8GPUs with batch-sizeof 4/GPU.We use the AdamW optimiser[34]witha maximum learning rate of 5 ℅ 10.5 for the camera back-bone and 1 ℅ 10.3 for all other components. We apply the following augmentations: random mirror flips inYdi-mensions, affine transformations (rotations and scale), and camera-lidar copy-paste augmentations[50]. 
+
+5.1. 3D object detection 
+We present results for the task of 3D object detection on Tab.1. Compared to baselines based on the Lift-Splat pro-jection[28, 33], our method shows improvements both on the validation and test splits of the nuScenes dataset. In particular, we show substantial improvements in both mAP (+1.1)and NDS(+0.4)on the test split. Since the lidar backbone is frozen and similar in all approaches, this shows that our model is better able to leverage camera features. Per-class object detection results as well as comparison to other methods canbe foundinTab. S2 and Sec. B.1. 
+We can analyse further the performance of our model by clustering objects together depending on their distances from the ego and on their sizes, see Fig. 3. We see that thebulkoftheimprovements comesfrom objects locatedat large distances and of small sizes. These are situations for which monocular depth estimation is particularly difficult which could explain why our model fares better in these cases. Note that even though far-away and small objects contain less lidar points, our model is still able to leverage camera features effectively even though the context given 
+val.  test  
+mAP  NDS  mAP  NDS  
+BEVFusion [33]  68.5  71.4  70.2  72.9  
+BEVFusion [28]  69.6  72.1  71.3  73.3  
+Ours  71.2  72.7  71.5  73.6  
+Ours w/ TFA  72.1  73.8  - - 
+
+BEVFusion. 
+[33]  73.7  74.9  75.0  76.1  
+Ours.  74.6  75.1  - - 
+Ours w/ TFA.  75.7  76.0  75.5  74.9  
+
+Table 1. Our method compared to LiftSplat-based camera-lidar fusion baselines on the validation and test splits of the nuScenes dataset. TFA:Temporal Feature Aggregation. . denotes test-time augmentations and model ensembling. 
+
+Figure 3. Object detection performance measured using mAP for objects at different distances from the ego and of different sizes. Our model consistently outperforms baselines based onLift-Splat, especially at large distances and for small objects. 
+by the lidar is weaker. 
+Finally, we show results that use test-time-augmentations (TTA) and model ensembling at the bottomofTab. 1.We performTTA overa combinationof mirror and rotation augmentations and ensemble models with cell resolutions of 0.05m, 0.075m and 0.10m. We first apply TTA at each cell resolution and then merge the resulting boxes usingWeighted Boxes Fusion (WBF)[47]. Unsurprisingly, our method shows excellent scaling with respect to these techniques and outperforms BEVFu-sion[33]on the nuScenesvalidation set. More details can be found in Sec. B.3. 
+
+5.2. Qualitative analysis 
+We visualise where camera features are projectedonto the BEV grid and compare our method to BEVFusion[33]. For our method, we examine the attention map of the fi-
+
+Ours BEVFusion[33] Ours BEVFusion[33] 
+
+Camera only Camera+lidar
+(a) (b) 
+
+(c) 
+
+Figure 4. (a, b) Visualisation of where camera features of ground-truth objects are projected onto the BEV grid for our method compared to BEVFusion[33].We observe that our methodis ableto place camera features around objects more narrowly than BEVFusion, whichis based on monocular depth estimation. (c) Comparison of object saliencymaps for models trained with camera only (top) and camera and lidar (bottom). When trained with both camera and lidar, our model selects camera features in an area that is different than when trained with camera only, while[33]behaves similarly in both settings. Saliencymaps and original images showthe corresponding ground-truth box for context. 
+nal cross-attention block in the transformer, averaged over derived by computing the gradient of the maximum class all attention heads.For BEVFusion,weusethethe monoc-logitwith respecttoa cameraimage Ij, given object query ular depth estimate to establish the strength of correspon-index i and probabilities z, as: 
+dence between positions in camera and BEV space. We consider only the pixels corresponding to ground-truth ob-.zi,c.
+jects when calculating the total weight of projected camera .I 
+
+where c.= arg max zi,c. (6) 
+c 
+Ij
+features in BEV, see Sec. B.2 for details. As can be seen in Fig. 4a (left), our method places camera features predom-inantly in regions where ground-truth bounding boxes are present. Thisindicates that it can effectively leverage the lidarpointcloudasacontextinordertoproject camerafea-tures at the relevant location in BEV. Compared to BEVFu-sion shown in Fig. 4b, the distribution of features appears more narrowly localised and stronger around objects. This couldbeduetothefactourprojection mechanismdoesnot require the weights of the camera features to be normalised along their ray, giving our model more flexibility to place features at the desired location. It is interestingto note that even though our method also projects camera features out-side of ground-truth boxes in BEV, the strength of the acti-vation in these regions is suppressed by the fusion module, see Fig. S4. This is consistent with our findings in Sec. 3, where we showed that the latter part of the model is able to effectively suppress camera features at the wrong location. More examples can be found in Sec. B.2. 
+We further explore which pixels in the camera images are most attended to using saliency maps[46]. These are 
+Theyallowus to visualise the contribution of individual pix-
+els to the final prediction for a selected object, see Fig. S2 (right). Interestingly, we observe that when trained with both camera and lidar,our model tends to select camera fea-tures at different locations than when trained with cameras only. In the absence of lidar, our method selects camera features across the entirety of the object, while in the pres-ence of both lidar and cameras, the model selects camera features mainly from the upper part of the object. We ob-serve that this pattern is mostly prevalent for objects close to the ego which are well-represented by lidar point clouds butfadesawayforfar-away objectsor objectswithfewlidar points such as pedestrians, see Fig. S2 for more examples. Wehypothesise that our projection architecture enables the model to select camera features that complement best the information encoded in lidar, resulting in differing attention patterns between camera-only and fusion settings. This pat-tern is less present in BEVFusion[33], which attends to the broader neighbourhood of pixels surrounding the selected object in both cases. 
+mAP NDS 
+Fusion module:  
+Cat+Conv  70.43  71.9  
+Gated sigmoid [28]  70.12  71.9  
+Add  70.32  72.1  
+Number of decoder blocks.:  
+1block  70.29  71.9  
+2blocks  70.40  72.0  
+4blocks  70.49  71.9  
+
+Number of frames in TFA:  
+1frame (no TFA)  71.2  72.8  
+2frames  72.1  73.3  
+3frames  72.1  73.8  
+
+Table 2. Impact of various modifications of our model on 3D ob-ject detection performance: (i) feature fusion module, (ii) number of transformer decoder blocks in the ※Attend§ stage, (iii) num-berof framesinTemporal Feature Aggregation(TFA). . indicates frozen camera backbone. 
+
+5.3. Temporal feature aggregation 
+Because our method fuses camera and lidar features onto a BEV grid, we can easily leverage past information us-ing temporal feature aggregation (TFA). To achieve this, we implement the simple autoregressive procedure of VideoBEV[12]but aggregate the fused BEV featuresBfus. instead of the camera features. Our method is as follows: (i) savethe fused BEV features from the previous timestep, (ii) apply ego motion compensation to align these features with the current timestep, using bilinear sampling to construct the new feature grid, (iii) concatenate these features with the fused BEV features of the current timestep and merge them using a simple 3 ℅ 3 convolutional block. 
+We train TFA models on sequences of3 frames for 10 epochs starting from a pretrained object detection head, li-dar and camera backbones (from our single frame model). During training, the lidar and camera backbones are kept frozen. For inference, we accumulate BEV features for the entire length of a run, yielding detections at each time step. Table1shows that temporal feature aggregation boosts ob-ject detection performance significantly, both without and with TTAand model ensembling. 
+
+5.4. Ablation experiments 
+We ablate some design choices for our method and show their impact on object detection performance on Tab. 2. For all the ablation experiments, we use a simpler train-ing schedule with 10 epochs, batch accumulation instead of full batch training and no camera augmentations. We first analyse the impact of different implementations of the fu-sion module: we compare a simple skip connection (add), a small concatenation and convolution layer (Cat+Conv as in[33]) andagated sigmoid block[28].We find allof them to perform very similarly, with Cat+Conv perform-ing slightly beter with respect to mAP, contrary to findings of[28].We also ablatethe numberof transformer decoder blocks in the ※Attend§ stage of our projection and show that increasing their number does lead to small improvement in mAP. This suggests that our method can scale up with in-creased computebut we usea single decoder blockin our experiments as it provides good balance between quality and performance. Finally, we also see good improvement in detection score when increasing numberof framesinTem-poral Feature Aggregation during training. 
+6. Conclusion 
+In this work, we have analysed the role of monocular depth prediction in recent state-of-the-art camera-lidar fu-sion methods and showed that, surprisingly, improvements in depth estimation did not lead to better object detection performance. Strikingly, we also showed that removing depth estimation altogether did notworsen performance sig-nificantly. Thisledustohypothesisethat relyingon monoc-ular depth estimation could be an unnecessary architectural bottleneck when fusing camera and lidar, and prompted us to introduce a novel fusion method that directly com-bines camera and lidar features using a simple attention mechanism. Compared to projecting camera features us-ing monocular depth, our method allows camera features to contributeto multiple locationsinBEV spaceandgives our model greater flexibility to select complementary camera and lidar features. Finally, we validated the effectiveness of our method on the nuScenes dataset and showed that it im-proves object detection performance over baselines based on monocular depth estimation and showcased the role of attentionasakey contributorto these improvements. We hope that our work will motivate discussions around the role of monocular depth prediction in camera-lidar fusion and motivate further developments in multi-modal percep-tion more generally. 
+Acknowledgements 
+We thank ourFiveAIand Bosch colleagues, especiallyTom Joy and Anthony Knittel, for their valuable feedback and suggestions on the manuscript. We are grateful to Bhavesh Garg for his initial experiments into depth supervision, whilst interning at FiveAI, which helped spawn the basis of this work. Finally, we thank Blaine Rogers for the early work on fusion at FiveAI from which this work developed. 
+References 
+[1] Xuyang Bai, Zeyu Hu, Xinge Zhu, Qingqiu Huang, Yilun Chen, Hongbo Fu, and Chiew-Lan Tai. Transfusion: Ro-bust lidar-camera fusion for 3d object detection with trans-
+formers. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 1090每1099, 2022. 2,5,6 
+[2] Holger Caesar,Varun Bankiti, AlexHLang, SourabhVora, Venice Erin Liong, Qiang Xu, Anush Krishnan,YuPan, Gi-ancarlo Baldan, and Oscar Beijbom. nuscenes: A multi-modal dataset for autonomous driving. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 11621每11631, 2020. 2,5,6 
+[3] Xiaozhi Chen, Kaustav Kundu, Ziyu Zhang, Huimin Ma, Sanja Fidler, and Raquel Urtasun. Monocular 3d object de-tection for autonomous driving. In 2016 IEEE Conference on ComputerVision andPattern Recognition (CVPR), pages 2147每2156, 2016. 2 
+[4] Xiaozhi Chen, Huimin Ma, Ji Wan, Bo Li, and Tian Xia. Multi-view 3d object detection network for autonomous driving. In Proceedings of the IEEE conference on Computer Vision andPattern Recognition, pages 1907每1915, 2017. 2 
+[5] Yukang Chen, Yanwei Li, Xiangyu Zhang, Jian Sun, and Jiaya Jia. Focal sparse convolutional networks for 3d ob-ject detection. In Proceedings of the IEEE/CVF Conference on ComputerVision andPattern Recognition, pages 5428每 5437, 2022. 2 
+[6] Zehui Chen, Zhenyu Li, Shiquan Zhang, Liangji Fang, Qinghong Jiang, Feng Zhao, Bolei Zhou, and Hang Zhao. Autoalign: pixel-instance feature aggregation for multi-modal 3d object detection. arXiv preprint arXiv:2201.06493, 2022. 2 
+[7] Zhiyu Chong, Xinzhu Ma, Hong Zhang,YuxinYue, Haojie Li, ZhihuiWang, andWanli Ouyang. Monodistill: Learn-ing spatial features for monocular 3d object detection. arXiv preprint arXiv:2201.10830, 2022. 2 
+[8] Florian Drews, Di Feng, Florian Faion, Lars Rosenbaum, Michael Ulrich, and Claudius Gl“aser. Deepfusion: A ro-bust and modular 3d object detector for lidars, cameras and radars. In 2022 IEEE/RSJ International Conference on In-telligent Robots and Systems (IROS), pages 560每567. IEEE, 2022. 2 
+[9] David Eigen, Christian Puhrsch, and Rob Fergus. Depth map prediction from a single image using a multi-scale deep net-work. In Advances in Neural Information Processing Sys-tems. Curran Associates, Inc., 2014. 3, 12 
+[10] Jonas Gehring, Michael Auli,David Grangier, DenisYarats, andYannNDauphin. Convolutional sequence to sequence learning. In International conference on machine learning, pages 1243每1252. PMLR, 2017. 6 
+[11] Xiaoyang Guo, Shaoshuai Shi, XiaogangWang, and Hong-sheng Li. Liga-stereo: Learning lidar geometry aware rep-resentations for stereo-based 3d detector. In Proceedings of the IEEE/CVF International Conference on ComputerVi-sion, pages 3153每3163, 2021. 2 
+[12] Chunrui Han, Jianjian Sun, Zheng Ge, JinrongYang, Run-pei Dong, Hongyu Zhou, Weixin Mao, Yuang Peng, and Xiangyu Zhang. Exploring recurrent long-term tempo-ral fusion for multi-view 3d perception. arXiv preprint arXiv:2303.05970, 2023. 2,8 
+[13] Dan Hendrycks and Kevin Gimpel. Gaussian error linear units (gelus). arXiv preprint arXiv:1606.08415, 2016. 6 
+[14] Haotian Hu, Fanyi Wang, Jingwen Su, Yaonong Wang, Laifeng Hu,WeiyeFang, Jingwei Xu, and Zhiwang Zhang. Ea-lss: Edge-aware lift-splat-shot framework for 3d bev ob-ject detection, 2023. 1,2,4,5 
+[15] Dihe Huang, Ying Chen, Yikang Ding, Jinli Liao, Jianlin Liu, KaiWu, Qiang Nie,Yong Liu, ChengjieWang, and Zhi-heng Li. Rethinking dimensionality reduction in grid-based 3d object detection. arXiv preprint arXiv:2209.09464, 2022. 
+2 
+[16] Junjie Huang, Guan Huang, Zheng Zhu,YunYe, and Dalong Du. Bevdet: High-performance multi-camera 3d object de-tection in bird-eye-view. arXiv preprint arXiv:2112.11790, 2021. 2 
+[17] Tengteng Huang, Zhe Liu, Xiwu Chen, and Xiang Bai. Ep-net: Enhancing point features with image semantics for 3d object detection. In ComputerVision每ECCV 2020: 16th Eu-ropean Conference, Glasgow,UK,August 23每28, 2020,Pro-ceedings,Part XV 16, pages 35每52. Springer, 2020. 2 
+[18] Xiaohui Jiang, Shuailin Li,Yingfei Liu, ShihaoWang,Fan Jia,TiancaiWang, Lijin Han, and Xiangyu Zhang. Far3d: Expanding the horizon for surround-view 3d object detec-tion. arXiv preprint arXiv:2308.09616, 2023. 2 
+[19] Junho Koh, Junhyung Lee, Youngwoo Lee, Jaekyum Kim, and Jun Won Choi. Mgtanet: Encoding sequential lidar points using long short-term motion-guided temporal atten-tion for 3d object detection. In Proceedings of the AAAI Con-ference on Artificial Intelligence, pages 1179每1187, 2023. 2 
+[20] Jason Ku, Melissa Mozifian, Jungwook Lee, Ali Harakeh, and StevenLWaslander. Joint 3d proposal generation and object detection from view aggregation. In 2018 IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS), pages 1每8. IEEE, 2018. 2 
+[21] JasonKu, AlexDPon, and StevenLWaslander. Monocular 3d object detection leveraging accurate proposals and shape reconstruction. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 11867每 11876, 2019. 2 
+[22] AlexH Lang, SourabhVora, Holger Caesar, Lubing Zhou, JiongYang, and Oscar Beijbom. Pointpillars:Fast encoders for object detection from point clouds. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 12697每12705, 2019. 2 
+[23] Yingwei Li, AdamsWeiYu,Tianjian Meng, Ben Caine, Ji-quan Ngiam, Daiyi Peng, Junyang Shen,Yifeng Lu, Denny Zhou,QuocVLe,etal. Deepfusion: Lidar-cameradeepfu-sion for multi-modal 3d object detection. In Proceedings of the IEEE/CVF Conference on ComputerVision andPattern Recognition, pages 17182每17191, 2022. 2 
+[24] Yinhao Li, Zheng Ge, Guanyi Yu, Jinrong Yang, Zengran Wang,Yukang Shi, Jianjian Sun, and Zeming Li. Bevdepth: Acquisition of reliable depth for multi-view 3d object detec-tion. In Proceedings of the AAAI Conference on Artificial Intelligence, pages 1477每1485, 2023. 3, 12 
+[25] Zhiqi Li, Wenhai Wang, Hongyang Li, Enze Xie, Chong-hao Sima, Tong Lu, Yu Qiao, and Jifeng Dai. Bevformer: Learning bird＊s-eye-view representation from multi-camera images via spatiotemporal transformers. In European con-ference on computer vision, pages 1每18. Springer, 2022. 2 
+[26] Ming Liang, BinYang, ShenlongWang, and Raquel Urtasun. Deep continuous fusion for multi-sensor 3d object detection. In Proceedings of the European conference on computer vi-sion (ECCV), pages 641每656, 2018. 2 
+[27] Tingting Liang, Xiaojie Chu, Yudong Liu, Yongtao Wang, ZhiTang,Wei Chu, Jingdong Chen, and Haibin Ling. CB-Net: A composite backbone network architecture for ob-ject detection. IEEETransactions on ImageProcessing, 31: 6893每6906, 2022. 5 
+[28] Tingting Liang, Hongwei Xie, KaichengYu, Zhongyu Xia, Zhiwei Lin,YongtaoWang,TaoTang, BingWang, and Zhi Tang. Bevfusion: A simple and robust lidar-camera fusion framework. Advances in Neural Information Processing Sys-tems, 35:10421每10434, 2022. 1,2,4,5,6,8,13 
+[29] Tsung-Yi Lin, Piotr Doll∩ar, Ross Girshick, Kaiming He, Bharath Hariharan, and Serge Belongie. Feature pyra-mid networks for object detection. In Proceedings of the IEEE conference on computer vision and pattern recogni-tion, pages 2117每2125, 2017. 5 
+[30] Xuewu Lin, Tianwei Lin, Zixiang Pei, Lichao Huang, and Zhizhong Su. Sparse4d: Multi-view 3d object detec-tion with sparse spatial-temporal fusion. arXiv preprint arXiv:2211.10581, 2022. 2 
+[31]Yingfei Liu,TiancaiWang, Xiangyu Zhang, and Jian Sun. Petr: Position embedding transformation for multi-view 3d object detection. In European Conference on ComputerVi-sion, pages 531每548. Springer, 2022. 2 
+[32]YingfeiLiu, JunjieYan,FanJia, ShuailinLi,AqiGao,Tian-caiWang, and Xiangyu Zhang. Petrv2:Aunified framework for 3d perception from multi-camera images. In Proceedings of the IEEE/CVF International Conference onComputerVi-sion, pages 3262每3272, 2023. 2 
+[33] Zhijian Liu, HaotianTang, Alexander Amini, XinyuYang, Huizi Mao, Daniela L Rus, and Song Han. Bevfusion: Multi-task multi-sensor fusion with unified bird＊s-eye view representation. In 2023 IEEE International Conference on Robotics andAutomation (ICRA), pages 2774每2781. IEEE, 2023. 1,2,3,4,5,6,7,8, 12, 13, 14, 15, 17 
+[34] Ilya Loshchilov and Frank Hutter. Decoupled weight decay regularization. arXiv preprint arXiv:1711.05101, 2017. 6 
+[35] Anton Mikhailov. Turbo, an improved rainbow col-ormap for visualization. https://blog.research. 
+google 
+/ 
+2019 
+/ 
+08 
+/ 
+turbo 
+-improved 
+-rainbow 
+-colormap-for.html, 2019. Accessed: 20th October 2023. 12 
+[36] Vinod Nair and GeoffreyEHinton. Rectified linear units im-prove restricted boltzmann machines. In Proceedings of the 27th international conference on machine learning (ICML-10), pages 807每814, 2010. 6 
+[37] Kranti Parida, Neeraj Matiyali, Tanaya Guha, and Gaurav Sharma. Coordinated joint multimodal embeddings for gen-eralized audio-visual zero-shot classification and retrieval of videos. In Proceedings of the IEEE/CVF winter conference on applications of computer vision, pages 3251每3260, 2020. 
+[38] Jonah Philion and Sanja Fidler. Lift, splat, shoot: Encod-ing imagesfrom arbitrary camera rigsby implicitly unpro-
+jecting to 3d. In ComputerVision每ECCV 2020: 16th Euro-pean Conference, Glasgow, UK,August 23每28, 2020, Pro-ceedings,Part XIV16, pages 194每210. Springer, 2020. 1,2, 4 
+[39] AJ Piergiovanni, Vincent Casser, Michael S Ryoo, and Anelia Angelova. 4d-net for learned multi-modal alignment. In Proceedings of the IEEE/CVF International Conference on ComputerVision, pages 15435每15445, 2021. 2 
+[40] CharlesRQi, Hao Su, Kaichun Mo, and LeonidasJGuibas. Pointnet: Deep learning on point sets for 3d classification and segmentation. In Proceedings of the IEEE conference on computer vision and pattern recognition, pages 652每660, 2017. 2 
+[41] Charles Ruizhongtai Qi, Li Yi, Hao Su, and Leonidas J Guibas. Pointnet++: Deep hierarchical feature learning on point sets in a metric space. Advances in neural information processing systems, 30, 2017. 2 
+[42] CharlesRQi,WeiLiu, ChenxiaWu,HaoSu,and LeonidasJ Guibas. Frustum pointnets for 3d object detection from rgb-ddata. InProceedings of the IEEE conference on computer vision and pattern recognition, pages 918每927, 2018. 2 
+[43] Rui Qian, Divyansh Garg, Yan Wang, Yurong You, Serge Belongie, Bharath Hariharan, Mark Campbell, Kilian Q Weinberger, and Wei-Lun Chao. End-to-end pseudo-lidar for image-based 3d object detection. In Proceedings of the IEEE/CVF Conference on ComputerVision andPattern Recognition, pages 5881每5890, 2020. 2 
+[44] Avishkar Saha, Oscar Mendez, Chris Russell, and Richard Bowden. Translating images into maps. In 2022 Interna-tional conference on robotics and automation (ICRA), pages 9200每9206. IEEE, 2022. 2,4 
+[45] ShaoshuaiShi, XiaogangWang, and Hongsheng Li. Pointr-cnn: 3d object proposal generation and detection from point cloud. In Proceedings of the IEEE/CVF conference on com-puter vision and pattern recognition, pages 770每779, 2019. 
+2 
+[46] Karen Simonyan, AndreaVedaldi, and Andrew Zisserman. Deep inside convolutional networks: Visualising image classification models and saliency maps. arXiv preprint arXiv:1312.6034, 2013. 7 
+[47] RomanA. Solovyev andWeiminWang.Weighted boxes fu-sion: ensembling boxes for object detection models. CoRR, abs/1910.13302, 2019. 6, 13 
+[48] AshishVaswani, Noam Shazeer, NikiParmar, Jakob Uszko-reit, Llion Jones, AidanNGomez, .ukasz Kaiser, and Illia Polosukhin. Attention is allyou need. Advances in neural information processing systems,30, 2017. 4,6 
+[49] SourabhVora, AlexHLang, Bassam Helou, and Oscar Bei-jbom. Pointpainting: Sequential fusion for 3d object de-tection. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 4604每4612, 2020. 2 
+[50] ChunweiWang, Chao Ma, Ming Zhu, and XiaokangYang. Pointaugmenting: Cross-modal augmentation for 3d object detection. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 11794每11803, 2021. 6 
+[51] ChunweiWang, Chao Ma, Ming Zhu, and XiaokangYang. Pointaugmenting: Cross-modal augmentation for 3d object detection. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 11794每 11803, 2021. 2 
+[52] ShihaoWang,Yingfei Liu,TiancaiWang,Ying Li, and Xi-angyu Zhang. Exploring object-centric temporal modeling for efficient multi-view 3d object detection. arXiv preprint arXiv:2303.11926, 2023. 2 
+[53]WeiyaoWang,DuTran,andMatt Feiszli. Whatmakes train-ing multi-modal classification networks hard? In Proceed-ings of the IEEE/CVF conference on computer vision and pattern recognition, pages 12695每12705, 2020. 1 
+[54] ZhixinWang andKui Jia. Frustumconvnet: Sliding frus-tums to aggregate local point-wisefeatures for amodal 3d ob-ject detection. In 2019 IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS),pages 1742每1749. IEEE, 2019. 2 
+[55] ZiningWang,Wei Zhan, and MasayoshiTomizuka. Fusing bird view lidar point cloud and front view camera image for deep object detection, 2018. 2 
+[56] Ruibin Xiong,YunchangYang, Di He, Kai Zheng, Shuxin Zheng, Chen Xing, Huishuai Zhang, Yanyan Lan, Liwei Wang, andTieyan Liu. On layer normalizationin the trans-former architecture. In International Conference on Machine Learning, pages 10524每10533. PMLR, 2020. 6 
+[57] Shaoqing Xu, Dingfu Zhou, JinFang, JunboYin, Zhou Bin, and Liangjun Zhang. Fusionpainting: Multimodal fusion with adaptiveattention for 3d object detection. In 2021 IEEE International IntelligentTransportation Systems Conference (ITSC), pages 3047每3054. IEEE, 2021. 2 
+[58]YanYan,YuxingMao,andBoLi. Second: Sparsely embed-ded convolutional detection. Sensors (Basel, Switzerland), 18, 2018. 6 
+[59]YanYan,YuxingMao,andBoLi. Second: Sparsely embed-ded convolutional detection. Sensors, 18(10):3337, 2018. 2 
+[60] BinYang,Wenjie Luo, and Raquel Urtasun. Pixor: Real-time 3d object detection from point clouds. In Proceedings of the IEEE conference on ComputerVision andPattern Recog-nition, pages 7652每7660, 2018. 2 
+[61] ZeyuYang, Jiaqi Chen, Zhenwei Miao,Wei Li, Xiatian Zhu, and Li Zhang. Deepinteraction: 3d object detection via modality interaction. Advances in Neural Information Pro-cessing Systems, 35:1992每2005, 2022. 13 
+[62] TianweiYin, Xingyi Zhou, and Philipp Krahenbuhl. Center-based 3d object detection and tracking. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 11784每11793, 2021. 2 
+[63] TianweiYin, Xingyi Zhou, and Philipp Kr“uhl. Multi-
+ahenb“modal virtual point 3d detection. Advances in Neural Infor-mation Processing Systems, 34:16494每16507, 2021. 2 
+[64] Jinqing Zhang, Yanan Zhang, Qingjie Liu, and Yunhong Wang. Sa-bev: Generating semantic-aware bird＊s-eye-view feature for multi-view 3d object detection. In Proceedings of the IEEE/CVF International Conference on ComputerVi-sion, pages 3348每3357, 2023. 2 
+[65] Yin Zhou and OncelTuzel. Voxelnet: End-to-end learning for point cloud based 3d object detection. In Proceedings of 
+the IEEE conference on computer vision and pattern recog-nition, pages 4490每4499, 2018. 2,5 
+[66] BenjinZhu, Zhengkai Jiang, Xiangxin Zhou, Zeming Li, and GangYu. Class-balanced grouping and sampling for point cloud 3d object detection, 2019. 6 
+[67] Zhuofan Zong, Dongzhi Jiang, Guanglu Song, Zeyue Xue, JingyongSu, HongshengLi,andYuLiu.Temporal enhanced training of multi-view3d object detector via historical object prediction. arXiv preprint arXiv:2304.00967, 2023. 2 
+
+Lift-Attend-Splat: Bird＊s-eye-view camera-lidar fusion using transformers 
+
+
+
+
+Supplementary Material 
+A. Monocular depth in the ※LiftSplat§ paradigm 
+
+
+A.1. Computation of ground truth depth from lidar 
+For each camera image we compute the ground depth map 
+Dgt ﹋ RH℅W 
+by projecting the 3D lidar point cloud onto the image plane and binning each point within the pixels of the camera feature map. For non-empty cells, we fol-low[24]and choose the depth to be the minimum distance (from the camera plane) of all the points in the cell, leaving the depth unspecified for empty cells and those for which the minimumyieldsadepthvaluewhichis outsidetherange of the model＊s depth bins. This depth map is suitable for visualisation and depth metricevaluation,but for depth su-pervision it is necessary to calculate the one-hot encoding of Dgt according tobuckets definedby the model＊s depth bins d ﹋ RND . 
+
+A.2. Visualisation of depth maps 
+We generatethe monoculardepthmapsshowninFig.1by calculating the weighted average of the model＊s depth bins d with the predicted depth distribution Dpred ﹋ RND℅H℅W 
+Dmean h,w  =  NDX preddnDn,h,w.  (7)  
+n  
+This  depth  map  is  constrained  by  construction  to  
+
+[min(d), max(d)] and we map this range onto the Turbo colour map[35]for visualisation. 
+The lidar depth map Dgt is similarly colourised, except for cells where the depth is unspecified as described above (see Fig. S1, top-right) which are coloured grey. 
+
+A.3. Supervision of predicted depth using lidar 
+We perform all of our experiments using the method pre-sented in[33]and use the original repository3. We use the vanilla Lift-Splat transform implemented in the class LSSTransform with default parameters provided in the original work. We supervise the depth classifier by intro-ducing the following loss alongside the original detection losses, 
+Ldepth  1 = . N  NX log(Dn  ﹞ 1n),  (8)  
+n  
+
+which is a cross-entropyloss between the lidar depth distri-bution and predicted depth distribution, taken over all cells for which the lidar depth is available. Dn ﹋ RND is the 
+3https://github.com/mit-han-lab/bevfusion 
+
+normalised predicted depth distribution from the LiftSplat model for the nth cell, 1n is the one-hot encoded lidar depth distribution for the nth cell. The model is trained end-to-end with all components unfrozen as in[33]andhyper-parameter 竹 controlling the strength of the depth supervi-sion loss with respect to the detection losses. 
+Wealsoexperiment with pretraining the depth estimation module within LiftSplat. First, we train the camera stream in[33] supervising only the depth distribution with the whole camera pipeline unfrozen. Following this pretrain-ing, we add the lidar components and train the full model end-to-end as in[33], with no depth supervision(竹 =0) and all modules unfrozen. 
+
+A.4. Extended depth quality results 
+We evaluate the performance of the depth classifier using five of the metrics proposed in[9]: root mean squared error (RMSE), root mean squared logarithmic error (RMSLE), mean absolute relative error (Abs. Rel.), mean squared rela-tive error (Sq. Rel.) and fraction outside 125% (Frac. 125). We show all the metrics for2 different methods of trans-lating the classification output into a depth map: ※mode§ 
+〞 in which we use the bin with maximum probability, and ※mean§ 〞 where the predicted depth is the weighted aver-age of all the bins. We take the average of these quantities over all predictions made by the depth classifier for which we have ground truth to compute the metrics. Camera fea-ture cells for which lidar depth is unspecified are ignored. We compare BEVFusion and four differentvariants: adding depth supervisionusingEq.(2)withvariousweights竹, us-ing lidar depth maps instead of monocular depth estimation (lidar), using a pretrained and frozen depth classifier (pre-trained), and finally removing depth estimation altogether by projecting camera features at all depths uniformly us-ing Eq.(3)(no depth). Quantitative results can be seen inTab. S1 and qualitative comparisonsin Fig. S1. 
+B. Detailed experimental results 
+
+
+B.1. 3D object detection 
+In Tab. S2 we present per-class detection scores and com-pare our model to other state-of-the-art models on the vali-dation and test splits of the nuScenes dataset. Our method outperforms baselines based on the LiftSplat paradigm.We are additionally showing how test-time-augmentations and temporal feature aggregation further improves these results. 
+
+Loss Weight  mAP  mode  mean  
+Relative  RMSE  Frac. 125  Relative  RMSE  Frac. 125  
+Abs.  Sq.  Linear  Log  Abs.  Sq.  Linear  Log  
+BEVFusion [33]  68.5  2.95  133.76  25.95  1.87  0.97  2.75  61.31  17.40  1.30  0.88  
+竹 = 0  68.4  3.69  176.09  30.22  1.90  0.96  2.83  68.73  18.54  1.34  0.87  
+0.001  68.1  1.79  65.63  20.16  1.77  0.94  3.14  79.87  19.91  1.39  0.88  
+0.01  68.0  0.61  11.78  11.54  1.03  0.63  0.76  10.30  8.09  0.68  0.61  
+0.1  68.1  0.38  5.53  9.28  0.77  0.41  0.43  4.97  6.47  0.46  0.37  
+1  68.1  0.21  2.48  5.78  0.37  0.20  0.22  2.23  4.77  0.33  0.19  
+5  66.6  0.19  2.01  4.77  0.33  0.17  0.19  1.95  4.53  0.32  0.17  
+100  64.6  0.16  1.15  4.64  0.33  0.17  0.16  1.12  4.55  0.32  0.17  
+Pretrained  67.4  0.54  8.10  9.95  0.86  0.61  0.64  7.91  7.87  0.66  0.57  
+Lidar  68.4  0.04  0.01  0.29  0.05  0.00  0.04  0.01  0.29  0.05  0.00  
+No depth  68.5  每  每  每  每  每  每  每  每  每  每  
+Table S1. Extended analysis of the monocular depth quality provided by different variations of the ※LiftSplat§ camera feature projection, see Sec. A.4. 
+
+
+Model  barrier  bicycle  bus  car  CV  MC  ped  TC  trailer  truck  mAP  NDS  
+Ours  74.1  70.0  81.3  90.3  33.8  80.8  89.3  79.7  44.0  68.2  71.2  72.7  
+BEVFusion[28]  73.5  67.5  77.7  89.1  30.9  79.0  89.4  79.3  42.6  66.7  69.6  72.1  
+DeepInteraction[61]  78.1  52.9  68.3  87.1  33.1  73.6  88.4  86.7  60.8  60.0  69.9  72.6  
+Ours.  77.5  75.2  82.3  91.2  40.0  85.6  90.6  80.2  50.1  72.2  74.6  75.1  
+Ours w/ TFA  74.4  72.4  81.6  90.8  33.7  82.5  89.8  79.6  45.8  70.1  72.1  73.8  
+Ours. w/ TFA  78.6  78.2  84.3  91.6  39.9  87.5  91.4  80.7  51.2  73.3  75.7  76.0  
+Ours  78.0  54.9  72.1  89.0  38.9  75.3  90.3  87.0  65.3  64.2  71.5  73.6  
+Ours. w/ TFA  79.7  65.2  75.2  90.3  43.5  82.8  92.0  87.1  70.1  68.9  75.5  74.9  
+BEVFusion[28]  78.3  56.5  72.0  88.5  38.1  75.2  90.0  86.5  64.7  63.1  71.3  73.3  
+DeepInteraction[61]  80.4  54.5  70.8  87.9  37.5  75.4  91.7  87.2  63.8  60.2  70.8  73.4  
+
+TableS2.Per-classobject detection scoresonthe nuScenesvalidationset(top)andtestset (bottom).TFA:Temporal FeatureAggregation. 
+. indicates ensembling+TTA. 
+
+
+B.2. Detailed qualitative results 
+To obtain Figure 4a for our method, we first compute 
+the full camera-to-BEV attention map Attn(cami↙bev) ﹋ RH℅W ℅N℅M 
+. To do so, we extract the attention map of the last transformer decoder block by averaging over all 
+RH℅W ℅D℅W
+heads, Attn(cami↙frustum) ﹋ ∩ , where (D ℅ W ∩ ) corresponds to the frustum dimension. We construct Attn(cami↙bev) by scattering the frustum attention values onto the BEV grid. Given camera image Ii, we then cre-ate Mask(i) ﹋{0, 1}H℅W by in-paint drawing the annota-tions, see Fig. S3, and obtain the BEV attention Attn(bev) ﹋ RN℅M shownon Figure 4aby projecting these camera fea-tures onto the BEV grid: 
+Attn(bev) = max Attn(cami↙bev) ﹞ Mask(i) (9)
+h,w h,w. 
+i,h,w 
+To obtain a similar visualisation for the ※LiftSplat§ pro-jection, see Figure 4b, we adjust the implementation of[33] but use the same model weights. Firstly, we replace the feature map of image Ii with Mask(i) and use that as in-put to the projection. This binary mask is ※lifted§ onto a 3D point cloud using the normalised depth classification weights Di for which we clipped the first5and last5depth bins. Mask(i) thus acts as an indicator function and Di specifies the strength of correspondence between pixels and the 3D point cloud P ﹋ RH℅W ℅ND℅3 . Secondly, during ※splatting§, we project points onto thez =0plane and pool them using max. This operation ensures that the weight of attention for large objects in the final visualisation does not overpower that of smaller objects. 
+
+
+B.3. Ensemble and test-time augmentations 
+For test-time-augmentation (TTA) and model ensembling, we use WBF[47]based on L2 distance metric per object category to decide which of the boxes to fuse. We first carry out TTA (using mirror and rotation augmentations) 
+
+
+Camera Lidar 
+
+End-to-end[33] Supervised 竹 =0 
+
+Supervised 竹 =0.001 Supervised 竹 =0.01 
+
+Supervised 竹 =0.1 Supervised 竹 =1 
+
+Supervised 竹 =5 Supervised 竹 = 100 
+Figure S1. Depth maps obtained after different levels of depth supervision on an example from the nuScenes val set. 
+with WBF for each cell resolution, and then apply another WBF on the outputs from TTAof each model to get the fi-nal detections which we use for evaluations. For rotation augmentation, we use (-12.5, -6.25, 0, 6.25, 12.5) degrees. 
+
+Ours BEVFusion[33] Ours BEVFusion[33] 
+
+
+
+
+Ours BEVFusion[33] Ours BEVFusion[33] 
+
+
+
+
+Figure S2. (a) Similarattentionpatternas highlightedinthemaintextforacloseobjectwhichis well-representedbythelidarpointcloud. 
+(b) For the same object,but ata later frame when the car moved furtheraway from theego, our model attends to the same area when trained with camera and lidar as when trained with camera only (left). (c) For an occluded object, whose representation in the lidar point cloudisweaker,ourmodelattendstotheentire unoccludedareainbothsettings. BEVFusion[33]appearsto consistentlyattendtoalarger neighbourhood of pixels. (d) The pedestrian, who is not well-represented by the lidar point cloud, is fully attended by our model in the presence of lidar and camera. 
+Scene Mask 
+
+(a) (b) 
+Figure S3. (a) Camera image Ii with annotations highlighted in white and our model＊s predictions, in colour. (b) Binary image Mask(i) created by in-painting the annotations. 
+Before fusion module After fusion module 
+
+(a) 
+(b) 
+
+(a) 
+(b) 
+
+(c) 
+(d) 
+
+
+Ours BEVFusion[33] 
+
+
+
+
